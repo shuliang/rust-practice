@@ -1,0 +1,11 @@
+#+TITLE: Rust Practice
+
+This repo contains [[https://www.rust-lang.org][Rust]] demos.
+
+* Intro to rust-lang
+This is a good video tutorial on [[https://www.youtube.com/playlist?list=PLJbE2Yu2zumDF6BX6_RdPisRVHgzV02NW][youtube]] ([[https://www.bilibili.com/video/BV1mt41197vx][bilibili]] also has a copy) made by [[https://github.com/tensor-programming][tensor-programming]].
+
+| code        |
+| [[file:intro-to-rust-lang/p8-snake/src/][p8-snake]]    |
+| [[file:intro-to-rust-lang/p14-threads/src/][p14-threads]] |
+| [[file:intro-to-rust-lang/p16-sniffer/src][p16-sniffer]] |
