@@ -1,0 +1,19 @@
+[package]
+name = "p18-blockchain"
+version = "0.1.0"
+authors = ["ShuLiang <shuliang@live.cn>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# time = "0.2.23"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.9.2"
+
+# time = "0.1.38"
+# serde = "1.0"
+# serde_derive = "1.0"
+# serde_json = "1.0"
+# sha2 = "0.7.0"
