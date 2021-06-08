@@ -9,3 +9,13 @@ This is a good video tutorial on [[https://www.youtube.com/playlist?list=PLJbE2Y
 | [[file:intro-to-rust-lang/p8-snake/src/][p8-snake]]    |
 | [[file:intro-to-rust-lang/p14-threads/src/][p14-threads]] |
 | [[file:intro-to-rust-lang/p16-sniffer/src][p16-sniffer]] |
+
+* yew examples
+Examples for [[https://github.com/yewstack/yew][yew]].
+
+| code    |
+| [[file:yew/yew-app/][yew-app]] |
+| [[file:yew/counter/][counter]] |
+| [[file:yew/timer/][timer]]   |
+| [[file:yew/todomvc/][todomvc]] |
+| [[file:yew/crm][crm]]     |

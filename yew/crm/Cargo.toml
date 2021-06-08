@@ -1,0 +1,10 @@
+[package]
+name = "crm"
+version = "0.1.0"
+authors = ["ShuLiang <shuliang@live.cn>"]
+edition = "2018"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+# yew = "0.17.4"
+yew = { git = "https://github.com/yewstack/yew", rev = "2c60d59" }

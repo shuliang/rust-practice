@@ -1,0 +1,9 @@
+[package]
+name = "timer"
+version = "0.1.0"
+authors = ["ShuLiang <shuliang@live.cn>"]
+edition = "2018"
+
+[dependencies]
+js-sys = "0.3.46"
+yew = "0.17.4"
