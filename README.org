@@ -22,3 +22,6 @@ Examples for [[https://github.com/yewstack/yew][yew]].
 
 * 《深入浅出rust》(dive into rust)
 Based on examples from [[https://book.douban.com/subject/30312231/][《深入浅出rust》]].
+| code               |
+| [[file:dive-into-rust/src/lib.rs][第一部分：基础知识]] |
+| [[file:dive-into-rust/src/lib.rs][第四部分：线程安全]] |
