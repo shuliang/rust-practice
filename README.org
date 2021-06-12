@@ -24,4 +24,4 @@ Examples for [[https://github.com/yewstack/yew][yew]].
 Based on examples from [[https://book.douban.com/subject/30312231/][《深入浅出rust》]].
 | code               |
 | [[file:dive-into-rust/src/lib.rs][第一部分：基础知识]] |
-| [[file:dive-into-rust/src/lib.rs][第四部分：线程安全]] |
+| [[file:dive-into-rust/src/lib.rs][第二部分：内存安全]] |
