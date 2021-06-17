@@ -77,12 +77,12 @@ mod tests {
         struct Foo2();
         assert_eq!(0, size_of::<Foo2>());
 
-        struct Foo3 {};
+        struct Foo3 {}
         assert_eq!(0, size_of::<Foo3>());
 
         struct Foo4 {
             x: i8,
-        };
+        }
         assert_eq!(1, size_of::<Foo4>());
     }
 
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_enum_size() {
-        enum Foo1 {};
+        enum Foo1 {}
         assert_eq!(0, size_of::<Foo1>());
 
         // can't compile
