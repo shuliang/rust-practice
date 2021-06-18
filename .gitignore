@@ -1,6 +1,7 @@
+target/
+log/
+
 .DS_Store
-*/target
-*/*/target
-*/*/*/target
+
 yew/*/dist
 yew/*/.log
