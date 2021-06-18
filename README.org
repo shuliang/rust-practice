@@ -22,8 +22,15 @@ Examples for [[https://github.com/yewstack/yew][yew]].
 
 * 《深入浅出rust》(dive into rust)
 Based on examples from [[https://book.douban.com/subject/30312231/][《深入浅出rust》]].
+
 | code               |
 | [[file:dive-into-rust/src/lib.rs][第一部分：基础知识]] |
 | [[file:dive-into-rust/src/lib.rs][第二部分：内存安全]] |
 | [[file:dive-into-rust/src/lib.rs][第三部分：高级抽象]] |
 | [[file:dive-into-rust/src/lib.rs][第四部分：线程安全]] |
+
+* 《精通rust》(Mastering rust)
+ Examples from[[https://book.douban.com/subject/35290878/][《精通rust(第2版)》]].
+
+| chapter | code       |
+|  11.5.2 | [[file:mastering-rust/ch11_log/env_logger_demo/src/main.rs][env_logger]] |
