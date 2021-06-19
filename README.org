@@ -32,8 +32,9 @@ Based on examples from [[https://book.douban.com/subject/30312231/][《深入浅
 * 《精通rust》(Mastering rust)
  Examples from[[https://book.douban.com/subject/35290878/][《精通rust(第2版)》]].
 
-| chapter | code       |
-|  11.5.2 | [[file:mastering-rust/ch11_log/env_logger_demo/src/main.rs][env_logger]] |
-|  11.5.3 | [[file:mastering-rust/ch11_log/log4rs_demo/][log4rs]]     |
-|  11.5.4 | [[file:mastering-rust/ch11_log/slog_demo/src/main.rs][slog]]       |
-|    12.2 | [[file:mastering-rust/ch12_net/rudis_sync/src/main.rs][rudis_sync]] |
+| chapter | code        |
+|  11.5.2 | [[file:mastering-rust/ch11_log/env_logger_demo/src/main.rs][env_logger]]  |
+|  11.5.3 | [[file:mastering-rust/ch11_log/log4rs_demo/][log4rs]]      |
+|  11.5.4 | [[file:mastering-rust/ch11_log/slog_demo/src/main.rs][slog]]        |
+|    12.2 | [[file:mastering-rust/ch12_net/rudis_sync/src/main.rs][rudis_sync]]  |
+|    12.3 | [[file:mastering-rust/ch12_net/rudis_async/src/main.rs][rudis_async]] |
