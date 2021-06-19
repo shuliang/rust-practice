@@ -36,3 +36,4 @@ Based on examples from [[https://book.douban.com/subject/30312231/][《深入浅
 |  11.5.2 | [[file:mastering-rust/ch11_log/env_logger_demo/src/main.rs][env_logger]] |
 |  11.5.3 | [[file:mastering-rust/ch11_log/log4rs_demo/][log4rs]]     |
 |  11.5.4 | [[file:mastering-rust/ch11_log/slog_demo/src/main.rs][slog]]       |
+|    12.2 | [[file:mastering-rust/ch12_net/rudis_sync/src/main.rs][rudis_sync]] |
