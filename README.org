@@ -39,3 +39,4 @@ Based on examples from [[https://book.douban.com/subject/30312231/][《深入浅
 |    12.2 | [[file:mastering-rust/ch12_net/rudis_sync/src/main.rs][rudis_sync]]  |
 |    12.3 | [[file:mastering-rust/ch12_net/rudis_async/src/main.rs][rudis_async]] |
 |  13.2.1 | [[file:mastering-rust/ch13_web/hyperurl/src/main.rs][hyperurl]]    |
+|  13.2.2 | [[file:mastering-rust/ch13_web/shorten/src/main.rs][shorten]]     |
