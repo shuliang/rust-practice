@@ -1,4 +1,4 @@
-#![feature(generators, generator_trait)]
+#![feature(generators, generator_trait, dropck_eyepatch)]
 
 // 第一部分：基础知识
 pub mod macrodemo;
@@ -9,10 +9,12 @@ pub mod typesize;
 pub mod borrow;
 pub mod dereference;
 pub mod drop;
+pub mod drop_check;
 pub mod interior_mut;
 pub mod lifetime;
 pub mod nll;
 pub mod unsafe_demo;
+pub mod variance;
 
 // 第三部分：高级抽象
 pub mod closure;
