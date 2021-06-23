@@ -13,6 +13,7 @@ pub mod drop_check;
 pub mod interior_mut;
 pub mod lifetime;
 pub mod nll;
+pub mod subtyping;
 pub mod unsafe_demo;
 pub mod variance;
 
