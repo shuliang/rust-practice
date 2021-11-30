@@ -51,3 +51,8 @@ Rust and distributed systems training courses from [[https://github.com/pingcap/
 - [[file:talent-plan/rust/project-3/src/lib.rs][project-3]]
 - [[file:talent-plan/rust/project-4/src/lib.rs][project-4]]
 - [[file:talent-plan/rust/project-5/src/lib.rs][project-5]]
+
+* mini-redis
+The official [[https://github.com/tokio-rs/tokio][Tokio]] (asynchronous runtime for rust) tutorial project, a simple and idiomatic implementation of a Redis client and server.
+- [[https://tokio.rs/tokio/tutorial][tutorial]]
+- [[file:tokio/mini-redis/src/lib.rs][code]]
