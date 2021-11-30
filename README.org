@@ -41,3 +41,13 @@ Based on examples from [[https://book.douban.com/subject/30312231/][《深入浅
 |  13.2.1 | [[file:mastering-rust/ch13_web/hyperurl/src/main.rs][hyperurl]]    |
 |  13.2.2 | [[file:mastering-rust/ch13_web/shorten/src/main.rs][shorten]]     |
 |    13.4 | [[file:mastering-rust/ch13_web/linksnap/src/main.rs][linksnap]]    |
+
+* talent-plan
+Rust and distributed systems training courses from [[https://github.com/pingcap/talent-plan][PingCAP talent-plan]].
+** Series 2: Rust Programming
+*** TP 201: Practical Networked Applications in Rust
+- [[file:talent-plan/rust/project-1/src/kv.rs][project-1]]
+- [[file:talent-plan/rust/project-2/src/kv.rs][project-2]]
+- [[file:talent-plan/rust/project-3/src/lib.rs][project-3]]
+- [[file:talent-plan/rust/project-4/src/lib.rs][project-4]]
+- [[file:talent-plan/rust/project-5/src/lib.rs][project-5]]
