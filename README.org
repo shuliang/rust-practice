@@ -56,3 +56,8 @@ Rust and distributed systems training courses from [[https://github.com/pingcap/
 The official [[https://github.com/tokio-rs/tokio][Tokio]] (asynchronous runtime for rust) tutorial project, a simple and idiomatic implementation of a Redis client and server.
 - [[https://tokio.rs/tokio/tutorial][tutorial]]
 - [[file:tokio/mini-redis/src/lib.rs][code]]
+
+* The Book
+The official rust book - [[https://github.com/rust-lang/book][The Rust Programming Language]].
+
+- [[file:the-book/minigrep/src/main.rs][chapter 12: building a command line program]]
