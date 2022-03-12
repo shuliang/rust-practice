@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 /// The `KvStore` stores string key-value pairs.
 ///
-/// Key-value paris are stored in a `HashMap` in memory and not persisited to disk.
+/// Key-value paris are stored in a `HashMap` in memory and not persisted to disk.
 ///
 /// Example:
 ///
@@ -40,7 +40,7 @@ impl KvStore {
         self.store.get(&key).cloned()
     }
 
-    /// Remove a given key
+    /// Remove a given key.
     pub fn remove(&mut self, key: String) {
         self.store.remove(&key);
     }
