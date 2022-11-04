@@ -61,4 +61,5 @@ The official [[https://github.com/tokio-rs/tokio][Tokio]] (asynchronous runtime 
 The official rust book - [[https://github.com/rust-lang/book][The Rust Programming Language]].
 
 - [[file:the-book/minigrep/src/main.rs][chapter 12: building a command line program]]
+- [[file:the-book/add/adder/src/main.rs][chapter 14.3: cargo workspaces]]
 - [[file:the-book/hello/src/bin/main.rs][chapter 20: building a multithreaded web server]]
