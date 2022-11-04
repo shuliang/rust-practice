@@ -53,7 +53,8 @@ mod tests {
         assert_eq!(12, size_of::<[f32; 3]>());
         assert_eq!(0, size_of::<[f32; 0]>());
         // slice
-        assert_eq!(8, size_of::<&[i8; 2]>());
+        let psize = size_of::<&u8>();
+        assert_eq!(psize, size_of::<&[i8; 2]>());
         assert_eq!(16, size_of::<&[i8]>()); // fat pointer
         assert_eq!(16, size_of::<&mut [i8]>()); // fat pointer
         assert_eq!(8, size_of::<&[i32; 2]>());
