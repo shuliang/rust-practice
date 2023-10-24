@@ -1,0 +1,36 @@
+#+title: Hash Pipeline
+
+Demo code from [[https://noz.ai/hash-pipeline/][High-throughput stream processing in Rust]].
+
+* Single thread
+[[file:hash-single/src/main.rs][src]]
+
+#+name:hash-single.rs
+#+begin_src rust :crates '((blake3 . 1.5.0)(sha2 . 0.10.8)) :tangle hash-single/src/main.rs :comments link :main no :eval no
+use sha2::{Digest, Sha512};
+use std::time::Instant;
+
+const N: usize = 1_000_000_000;
+
+fn main() {
+    println!("hash-single start...");
+    let start = Instant::now();
+    for i in 0..N {
+        let preimage = (i as u64).to_le_bytes();
+        Sha512::digest(preimage);
+        blake3::hash(&preimage);
+    }
+    println!("total time: {:?}", start.elapsed());
+}
+#+end_src
+
+/Note: to save time, run it in "--release" mode, "--debug" mode takes hours./
+
+#+begin_src sh :dir hash-single :results output :exports both
+cargo run --release
+#+end_src
+
+#+RESULTS:
+: hash-single start...
+: total time: 214.70813464s
+

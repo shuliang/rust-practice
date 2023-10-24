@@ -5,3 +5,6 @@ log/
 
 yew/*/dist
 yew/*/.log
+
+# ignore direnv
+.direnv

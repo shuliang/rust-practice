@@ -68,3 +68,5 @@ The official rust book - [[https://github.com/rust-lang/book][The Rust Programmi
 - [[https://rust-unofficial.github.io/too-many-lists/][tutorial]]
 - [[https://course.rs/too-many-lists/intro.html][tutorial (cn)]]
 - [[file:too-many-lists/lists/src/lib.rs][code]]
+
+* [[file:hash-pipeline/hash-pipeline.org][hash-pipeline]]
