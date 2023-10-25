@@ -192,7 +192,7 @@ cargo run --release
 : total time: 259.291657468s
 
 ** with thread sleep
-/Uncomment "thread::sleep(Duration::from_millis(1))"/.
+/Uncomment "thread::sleep(Duration::from_millis(1))"./
 
 #+begin_src sh :dir hash-circular :results output :exports both
 cargo run --release
