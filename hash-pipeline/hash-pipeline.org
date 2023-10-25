@@ -201,3 +201,25 @@ cargo run --release
 #+RESULTS:
 : hash-circular start...
 : total time: 172.122766549s
+
+* Single thread with only SHA512
+/Comment "blake3::hash(&preimage);" in [[file:hash-single/src/main.rs][src]]./
+
+#+begin_src sh :dir hash-single :results output :exports both
+cargo run --release
+#+end_src
+
+#+RESULTS:
+: hash-single start...
+: total time: 163.528125573s
+
+* Single thread with only blake3
+/Comment "Sha512::digest(preimage);" in [[file:hash-single/src/main.rs][src]]./
+
+#+begin_src sh :dir hash-single :results output :exports both
+cargo run --release
+#+end_src
+
+#+RESULTS:
+: hash-single start...
+: total time: 53.694190896s
