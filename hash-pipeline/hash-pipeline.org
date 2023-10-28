@@ -337,3 +337,1613 @@ cargo run --release
 #+RESULTS:
 : hash-parallel start...
 : total time: 87.670414021s
+
+* Idle and blocked time
+** [[file:hash-idle-blocked/src/main.rs][src]]
+
+#+name:hash-idle-blocked.rs
+#+begin_src rust :crates '((blake3 . 1.5.0)(sha2 . 0.10.8)) :tangle hash-idle-blocked/src/main.rs :comments link :main no :eval no
+#![allow(non_snake_case)]
+use rtrb::{Consumer, Producer};
+use sha2::{Digest, Sha512};
+use std::collections::VecDeque;
+use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+const N: usize = 1_000_000_000;
+const CAPACITY: usize = 1_000_000;
+
+// const NUM_SHA512_HASHERS: usize = 2;
+// const NUM_BLAKE3_HASHERS: usize = 2;
+
+fn main() {
+    // println!("hash-idle-blocked start...");
+    let mut NUM_SHA512_HASHERS: usize = 2;
+    if let Some(arg) = env::args().nth(1) {
+        NUM_SHA512_HASHERS = arg.parse().unwrap();
+    }
+    let mut NUM_BLAKE3_HASHERS: usize = 2;
+    if let Some(arg) = env::args().nth(2) {
+        NUM_BLAKE3_HASHERS = arg.parse().unwrap();
+    }
+    let start = Instant::now();
+    let (mut generator_to_sha512_tx, mut generator_to_sha512_rx) =
+        ring_buffer(NUM_SHA512_HASHERS, CAPACITY);
+    let (mut generator_to_blake3_tx, mut generator_to_blake3_rx) =
+        ring_buffer(NUM_BLAKE3_HASHERS, CAPACITY);
+    let (mut sha512_to_result_tx, mut sha512_to_result_rx) =
+        ring_buffer(NUM_SHA512_HASHERS, CAPACITY);
+    let (mut blake3_to_result_tx, mut blake3_to_result_rx) =
+        ring_buffer(NUM_BLAKE3_HASHERS, CAPACITY);
+
+    let mut stats = vec![];
+
+    // Generator
+    let (idle, blocked) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    stats.push(("generator".to_string(), idle.clone(), blocked.clone()));
+    thread::spawn(move || {
+        let mut sha512_channel = 0;
+        let mut blake3_channel = 0;
+        for i in 0..N {
+            let preimage = (i as u64).to_le_bytes();
+            push(
+                &mut generator_to_sha512_tx[sha512_channel],
+                preimage,
+                &blocked,
+            );
+            push(
+                &mut generator_to_blake3_tx[blake3_channel],
+                preimage,
+                &blocked,
+            );
+            sha512_channel = (sha512_channel + 1) % NUM_SHA512_HASHERS;
+            blake3_channel = (blake3_channel + 1) % NUM_BLAKE3_HASHERS;
+        }
+    });
+
+    // Sha512
+    for i in 0..NUM_SHA512_HASHERS {
+        let (idle, blocked) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        stats.push((format!("sha512_{:_>2}", i), idle.clone(), blocked.clone()));
+        let mut rx = generator_to_sha512_rx.pop_front().unwrap();
+        let mut tx = sha512_to_result_tx.pop_front().unwrap();
+        thread::spawn(move || loop {
+            let preimage = pop(&mut rx, &idle);
+            let hash = Sha512::digest(preimage);
+            push(&mut tx, hash, &blocked);
+        });
+    }
+
+    // Blake3
+    for i in 0..NUM_BLAKE3_HASHERS {
+        let (idle, blocked) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        stats.push((format!("blake3_{:_>2}", i), idle.clone(), blocked.clone()));
+        let mut rx = generator_to_blake3_rx.pop_front().unwrap();
+        let mut tx = blake3_to_result_tx.pop_front().unwrap();
+        thread::spawn(move || loop {
+            let preimage = pop(&mut rx, &idle);
+            let hash = blake3::hash(&preimage);
+            push(&mut tx, hash, &blocked);
+        });
+    }
+
+    // Result
+    let (idle, blocked) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    stats.push(("result   ".to_string(), idle.clone(), blocked.clone()));
+    let result_thread = thread::spawn(move || {
+        let mut sha512_channel = 0;
+        let mut blake3_channel = 0;
+        for _ in 0..N {
+            pop(&mut sha512_to_result_rx[sha512_channel], &idle);
+            pop(&mut blake3_to_result_rx[blake3_channel], &idle);
+            sha512_channel = (sha512_channel + 1) % NUM_SHA512_HASHERS;
+            blake3_channel = (blake3_channel + 1) % NUM_BLAKE3_HASHERS;
+        }
+    });
+
+    // Stats
+    thread::spawn(move || {
+        let start = Instant::now();
+        loop {
+            for (name, idle, blocked) in stats.iter() {
+                let percent_idle = (100.0 * idle.load(Ordering::Relaxed) as f64
+                    / start.elapsed().as_millis() as f64) as i32;
+                let percent_blocked = (100.0 * blocked.load(Ordering::Relaxed) as f64
+                    / start.elapsed().as_millis() as f64)
+                    as i32;
+                println!(
+                    "{}: %idle={:>2} %blocked={:>2}",
+                    name, percent_idle, percent_blocked
+                );
+            }
+            println!();
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+
+    result_thread.join().unwrap();
+
+    println!(
+        "sha512 = {:>2}, blake3 = {:>2}, time = {:?}",
+        NUM_SHA512_HASHERS,
+        NUM_BLAKE3_HASHERS,
+        start.elapsed()
+    );
+}
+
+fn ring_buffer<T>(count: usize, capacity: usize) -> (VecDeque<Producer<T>>, VecDeque<Consumer<T>>) {
+    (0..count).map(|_| rtrb::RingBuffer::new(capacity)).unzip()
+}
+
+fn push<T>(tx: &mut Producer<T>, mut value: T, blocked: &Arc<AtomicU64>) {
+    loop {
+        match tx.push(value) {
+            Ok(_) => break,
+            Err(rtrb::PushError::Full(v)) => value = v,
+        }
+        let start = Instant::now();
+        thread::sleep(Duration::from_millis(10));
+        blocked.fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+}
+
+fn pop<T>(rx: &mut Consumer<T>, idle: &Arc<AtomicU64>) -> T {
+    loop {
+        if let Ok(value) = rx.pop() {
+            return value;
+        }
+        let start = Instant::now();
+        thread::sleep(Duration::from_millis(10));
+        idle.fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+}
+#+end_src
+
+** hashers: 4 threads
+#+begin_src sh :dir hash-idle-blocked :results output :exports both :eval no
+cargo run --release
+#+end_src
+
+#+RESULTS:
+#+begin_example
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle= 0 %blocked= 0
+blake3__1: %idle= 0 %blocked= 0
+result   : %idle= 0 %blocked= 0
+
+generator: %idle= 0 %blocked=84
+sha512__0: %idle= 1 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=24 %blocked=33
+blake3__1: %idle=24 %blocked=33
+result   : %idle=93 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=25 %blocked=35
+blake3__1: %idle=27 %blocked=33
+result   : %idle=93 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=27 %blocked=34
+blake3__1: %idle=28 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=32
+blake3__1: %idle=29 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=88
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=31 %blocked=31
+blake3__1: %idle=29 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=30 %blocked=31
+blake3__1: %idle=29 %blocked=32
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=30 %blocked=31
+blake3__1: %idle=29 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=30 %blocked=32
+blake3__1: %idle=29 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=30 %blocked=32
+blake3__1: %idle=29 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=29 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=29 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=29 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=29 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=86
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=33
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+generator: %idle= 0 %blocked=87
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 1 %blocked= 1
+blake3__0: %idle=28 %blocked=33
+blake3__1: %idle=28 %blocked=34
+result   : %idle=94 %blocked= 0
+
+sha512 =  2, blake3 =  2, time = 86.761303739s
+#+end_example
+
+** hashers enumeration - 40 threads
+#+begin_src sh :dir hash-idle-blocked :results output :exports both
+for ((i=2,j=38;i<=38;i++,j--)); do
+    cargo run --release $i $j
+done
+#+end_src
+
+#+RESULTS:
+#+begin_example
+sha512 =  2, blake3 = 38, time = 86.632513191s
+sha512 =  3, blake3 = 37, time = 58.063867006s
+sha512 =  4, blake3 = 36, time = 44.663368731s
+sha512 =  5, blake3 = 35, time = 35.903008252s
+sha512 =  6, blake3 = 34, time = 31.097491667s
+sha512 =  7, blake3 = 33, time = 30.306482338s
+sha512 =  8, blake3 = 32, time = 23.799556768s
+sha512 =  9, blake3 = 31, time = 21.810967986s
+sha512 = 10, blake3 = 30, time = 20.079705032s
+sha512 = 11, blake3 = 29, time = 18.820384983s
+sha512 = 12, blake3 = 28, time = 17.702287915s
+sha512 = 13, blake3 = 27, time = 16.596472412s
+sha512 = 14, blake3 = 26, time = 16.271594322s
+sha512 = 15, blake3 = 25, time = 15.685877513s
+sha512 = 16, blake3 = 24, time = 15.986634259s
+sha512 = 17, blake3 = 23, time = 16.860416545s
+sha512 = 18, blake3 = 22, time = 16.325181718s
+sha512 = 19, blake3 = 21, time = 16.766280643s
+sha512 = 20, blake3 = 20, time = 16.578140712s
+sha512 = 21, blake3 = 19, time = 16.809579201s
+sha512 = 22, blake3 = 18, time = 16.474577239s
+sha512 = 23, blake3 = 17, time = 16.106331195s
+sha512 = 24, blake3 = 16, time = 15.464055582s
+sha512 = 25, blake3 = 15, time = 15.091498392s
+sha512 = 26, blake3 = 14, time = 14.907556488s
+sha512 = 27, blake3 = 13, time = 14.900227512s
+sha512 = 28, blake3 = 12, time = 14.78084064s
+sha512 = 29, blake3 = 11, time = 14.844579035s
+sha512 = 30, blake3 = 10, time = 14.776609229s
+sha512 = 31, blake3 =  9, time = 14.683239508s
+sha512 = 32, blake3 =  8, time = 14.65877583s
+sha512 = 33, blake3 =  7, time = 14.701749787s
+sha512 = 34, blake3 =  6, time = 14.858746489s
+sha512 = 35, blake3 =  5, time = 15.186865739s
+sha512 = 36, blake3 =  4, time = 17.751734062s
+sha512 = 37, blake3 =  3, time = 22.729067202s
+sha512 = 38, blake3 =  2, time = 32.805388147s
+#+end_example
+
+** hashers enumeration - 32 threads
+#+begin_src sh :dir hash-idle-blocked :results output :exports both :eval no
+for ((i=2,j=30;i<=30;i++,j--)); do
+    cargo run --release $i $j
+done
+#+end_src
+
+#+RESULTS:
+#+begin_example
+sha512 =  2, blake3 = 30, time = 86.728548139s
+sha512 =  3, blake3 = 29, time = 59.414441613s
+sha512 =  4, blake3 = 28, time = 44.032127624s
+sha512 =  5, blake3 = 27, time = 36.182269652s
+sha512 =  6, blake3 = 26, time = 30.633723195s
+sha512 =  7, blake3 = 25, time = 26.510142105s
+sha512 =  8, blake3 = 24, time = 23.86746103s
+sha512 =  9, blake3 = 23, time = 21.481603809s
+sha512 = 10, blake3 = 22, time = 19.703162136s
+sha512 = 11, blake3 = 21, time = 19.376296643s
+sha512 = 12, blake3 = 20, time = 17.75028307s
+sha512 = 13, blake3 = 19, time = 17.032112178s
+sha512 = 14, blake3 = 18, time = 15.929335524s
+sha512 = 15, blake3 = 17, time = 15.306759998s
+sha512 = 16, blake3 = 16, time = 15.682690476s
+sha512 = 17, blake3 = 15, time = 16.503325127s
+sha512 = 18, blake3 = 14, time = 16.350157669s
+sha512 = 19, blake3 = 13, time = 16.463193215s
+sha512 = 20, blake3 = 12, time = 17.027997181s
+sha512 = 21, blake3 = 11, time = 16.584219509s
+sha512 = 22, blake3 = 10, time = 16.16723434s
+sha512 = 23, blake3 =  9, time = 15.854241974s
+sha512 = 24, blake3 =  8, time = 15.390064154s
+sha512 = 25, blake3 =  7, time = 15.099096687s
+sha512 = 26, blake3 =  6, time = 14.895168355s
+sha512 = 27, blake3 =  5, time = 15.015529766s
+sha512 = 28, blake3 =  4, time = 17.733102122s
+sha512 = 29, blake3 =  3, time = 22.858125833s
+sha512 = 30, blake3 =  2, time = 32.565750991s
+#+end_example
+
+** hashers enumeration - 30 threads
+#+begin_src sh :dir hash-idle-blocked :results output :exports both :eval no
+for ((i=2,j=28;i<=28;i++,j--)); do
+    cargo run --release $i $j
+done
+#+end_src
+
+#+RESULTS:
+#+begin_example
+sha512 =  2, blake3 = 28, time = 86.684560044s
+sha512 =  3, blake3 = 27, time = 58.117121062s
+sha512 =  4, blake3 = 26, time = 43.847395081s
+sha512 =  5, blake3 = 25, time = 36.05837931s
+sha512 =  6, blake3 = 24, time = 30.494214634s
+sha512 =  7, blake3 = 23, time = 26.822114558s
+sha512 =  8, blake3 = 22, time = 24.149974334s
+sha512 =  9, blake3 = 21, time = 21.594991045s
+sha512 = 10, blake3 = 20, time = 19.743808456s
+sha512 = 11, blake3 = 19, time = 18.609504531s
+sha512 = 12, blake3 = 18, time = 17.541477733s
+sha512 = 13, blake3 = 17, time = 16.468733961s
+sha512 = 14, blake3 = 16, time = 16.648403345s
+sha512 = 15, blake3 = 15, time = 15.498441108s
+sha512 = 16, blake3 = 14, time = 16.040117538s
+sha512 = 17, blake3 = 13, time = 16.202455498s
+sha512 = 18, blake3 = 12, time = 16.267090344s
+sha512 = 19, blake3 = 11, time = 16.440663249s
+sha512 = 20, blake3 = 10, time = 16.41193891s
+sha512 = 21, blake3 =  9, time = 16.380469267s
+sha512 = 22, blake3 =  8, time = 16.147540283s
+sha512 = 23, blake3 =  7, time = 15.953799085s
+sha512 = 24, blake3 =  6, time = 15.587536283s
+sha512 = 25, blake3 =  5, time = 15.086863977s
+sha512 = 26, blake3 =  4, time = 17.791638364s
+sha512 = 27, blake3 =  3, time = 22.535468706s
+sha512 = 28, blake3 =  2, time = 32.46831249s
+#+end_example
+
+** hashers enumeration - 24 threads
+#+begin_src sh :dir hash-idle-blocked :results output :exports both :eval no
+for ((i=2,j=22;i<=22;i++,j--)); do
+    cargo run --release $i $j
+done
+#+end_src
+
+#+RESULTS:
+#+begin_example
+sha512 =  2, blake3 = 22, time = 86.729244549s
+sha512 =  3, blake3 = 21, time = 58.670952241s
+sha512 =  4, blake3 = 20, time = 44.097265331s
+sha512 =  5, blake3 = 19, time = 36.830265405s
+sha512 =  6, blake3 = 18, time = 30.681609822s
+sha512 =  7, blake3 = 17, time = 26.273562324s
+sha512 =  8, blake3 = 16, time = 23.691033637s
+sha512 =  9, blake3 = 15, time = 21.256995344s
+sha512 = 10, blake3 = 14, time = 19.836033784s
+sha512 = 11, blake3 = 13, time = 19.308773427s
+sha512 = 12, blake3 = 12, time = 18.363141051s
+sha512 = 13, blake3 = 11, time = 17.00786859s
+sha512 = 14, blake3 = 10, time = 16.575421254s
+sha512 = 15, blake3 =  9, time = 16.528349037s
+sha512 = 16, blake3 =  8, time = 16.745971744s
+sha512 = 17, blake3 =  7, time = 17.070113113s
+sha512 = 18, blake3 =  6, time = 17.796738036s
+sha512 = 19, blake3 =  5, time = 18.080150643s
+sha512 = 20, blake3 =  4, time = 18.042006909s
+sha512 = 21, blake3 =  3, time = 22.338378353s
+sha512 = 22, blake3 =  2, time = 32.078582041s
+#+end_example
+
+** hashers: sha512 = 32, blake3 = 8
+#+begin_src sh :dir hash-idle-blocked :results output :exports both
+cargo run --release 32 8
+#+end_src
+
+#+RESULTS:
+#+begin_example
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 0 %blocked= 0
+sha512__1: %idle= 0 %blocked= 0
+sha512__2: %idle= 0 %blocked= 0
+sha512__3: %idle= 0 %blocked= 0
+sha512__4: %idle= 0 %blocked= 0
+sha512__5: %idle= 0 %blocked= 0
+sha512__6: %idle= 0 %blocked= 0
+sha512__7: %idle= 0 %blocked= 0
+sha512__8: %idle= 0 %blocked= 0
+sha512__9: %idle= 0 %blocked= 0
+sha512_10: %idle= 0 %blocked= 0
+sha512_11: %idle= 0 %blocked= 0
+sha512_12: %idle= 0 %blocked= 0
+sha512_13: %idle= 0 %blocked= 0
+sha512_14: %idle= 0 %blocked= 0
+sha512_15: %idle= 0 %blocked= 0
+sha512_16: %idle= 0 %blocked= 0
+sha512_17: %idle= 0 %blocked= 0
+sha512_18: %idle= 0 %blocked= 0
+sha512_19: %idle= 0 %blocked= 0
+sha512_20: %idle= 0 %blocked= 0
+sha512_21: %idle= 0 %blocked= 0
+sha512_22: %idle= 0 %blocked= 0
+sha512_23: %idle= 0 %blocked= 0
+sha512_24: %idle= 0 %blocked= 0
+sha512_25: %idle= 0 %blocked= 0
+sha512_26: %idle= 0 %blocked= 0
+sha512_27: %idle= 0 %blocked= 0
+sha512_28: %idle= 0 %blocked= 0
+sha512_29: %idle= 0 %blocked= 0
+sha512_30: %idle= 0 %blocked= 0
+sha512_31: %idle= 0 %blocked= 0
+blake3__0: %idle= 0 %blocked= 0
+blake3__1: %idle= 0 %blocked= 0
+blake3__2: %idle= 0 %blocked= 0
+blake3__3: %idle= 0 %blocked= 0
+blake3__4: %idle= 0 %blocked= 0
+blake3__5: %idle= 0 %blocked= 0
+blake3__6: %idle= 0 %blocked= 0
+blake3__7: %idle= 0 %blocked= 0
+result   : %idle= 0 %blocked= 0
+
+generator: %idle= 0 %blocked= 1
+sha512__0: %idle= 7 %blocked= 0
+sha512__1: %idle=11 %blocked= 0
+sha512__2: %idle= 5 %blocked= 0
+sha512__3: %idle= 7 %blocked= 0
+sha512__4: %idle=11 %blocked= 0
+sha512__5: %idle= 6 %blocked= 0
+sha512__6: %idle=12 %blocked= 0
+sha512__7: %idle=10 %blocked= 0
+sha512__8: %idle=15 %blocked= 0
+sha512__9: %idle= 8 %blocked= 0
+sha512_10: %idle=10 %blocked= 0
+sha512_11: %idle= 5 %blocked= 0
+sha512_12: %idle= 6 %blocked= 0
+sha512_13: %idle=13 %blocked= 0
+sha512_14: %idle=19 %blocked= 0
+sha512_15: %idle= 7 %blocked= 0
+sha512_16: %idle= 4 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 8 %blocked= 0
+sha512_19: %idle=12 %blocked= 0
+sha512_20: %idle= 9 %blocked= 0
+sha512_21: %idle=15 %blocked= 0
+sha512_22: %idle=15 %blocked= 0
+sha512_23: %idle=13 %blocked= 0
+sha512_24: %idle= 8 %blocked= 0
+sha512_25: %idle=15 %blocked= 0
+sha512_26: %idle= 7 %blocked= 0
+sha512_27: %idle=11 %blocked= 0
+sha512_28: %idle=14 %blocked= 0
+sha512_29: %idle= 4 %blocked= 0
+sha512_30: %idle=10 %blocked= 0
+sha512_31: %idle=17 %blocked= 0
+blake3__0: %idle=11 %blocked=11
+blake3__1: %idle= 7 %blocked= 2
+blake3__2: %idle=11 %blocked= 9
+blake3__3: %idle=10 %blocked= 6
+blake3__4: %idle= 9 %blocked= 5
+blake3__5: %idle= 8 %blocked=11
+blake3__6: %idle= 5 %blocked= 6
+blake3__7: %idle=13 %blocked= 6
+result   : %idle=61 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 5 %blocked= 0
+sha512__1: %idle=16 %blocked= 0
+sha512__2: %idle= 6 %blocked= 0
+sha512__3: %idle= 6 %blocked= 0
+sha512__4: %idle=10 %blocked= 0
+sha512__5: %idle=11 %blocked= 0
+sha512__6: %idle=14 %blocked= 0
+sha512__7: %idle=13 %blocked= 0
+sha512__8: %idle=15 %blocked= 0
+sha512__9: %idle=11 %blocked= 0
+sha512_10: %idle=11 %blocked= 0
+sha512_11: %idle= 9 %blocked= 0
+sha512_12: %idle= 7 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle=13 %blocked= 0
+sha512_15: %idle=13 %blocked= 0
+sha512_16: %idle= 7 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle=13 %blocked= 0
+sha512_19: %idle=15 %blocked= 0
+sha512_20: %idle=14 %blocked= 0
+sha512_21: %idle=18 %blocked= 0
+sha512_22: %idle=12 %blocked= 0
+sha512_23: %idle=15 %blocked= 0
+sha512_24: %idle=14 %blocked= 0
+sha512_25: %idle=16 %blocked= 0
+sha512_26: %idle=10 %blocked= 0
+sha512_27: %idle= 9 %blocked= 0
+sha512_28: %idle=15 %blocked= 0
+sha512_29: %idle= 9 %blocked= 0
+sha512_30: %idle=13 %blocked= 0
+sha512_31: %idle=16 %blocked= 0
+blake3__0: %idle=21 %blocked= 5
+blake3__1: %idle=19 %blocked= 1
+blake3__2: %idle=18 %blocked= 4
+blake3__3: %idle=18 %blocked= 3
+blake3__4: %idle=15 %blocked= 2
+blake3__5: %idle=12 %blocked= 5
+blake3__6: %idle= 8 %blocked= 3
+blake3__7: %idle=20 %blocked= 3
+result   : %idle=59 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 5 %blocked= 0
+sha512__1: %idle=13 %blocked= 0
+sha512__2: %idle= 6 %blocked= 0
+sha512__3: %idle= 6 %blocked= 0
+sha512__4: %idle= 9 %blocked= 0
+sha512__5: %idle= 9 %blocked= 0
+sha512__6: %idle=12 %blocked= 0
+sha512__7: %idle=12 %blocked= 0
+sha512__8: %idle=14 %blocked= 0
+sha512__9: %idle=10 %blocked= 0
+sha512_10: %idle=13 %blocked= 0
+sha512_11: %idle=11 %blocked= 0
+sha512_12: %idle= 7 %blocked= 0
+sha512_13: %idle=10 %blocked= 0
+sha512_14: %idle=11 %blocked= 0
+sha512_15: %idle=14 %blocked= 0
+sha512_16: %idle= 6 %blocked= 0
+sha512_17: %idle=12 %blocked= 0
+sha512_18: %idle=11 %blocked= 0
+sha512_19: %idle=14 %blocked= 0
+sha512_20: %idle=12 %blocked= 0
+sha512_21: %idle=15 %blocked= 0
+sha512_22: %idle=12 %blocked= 0
+sha512_23: %idle=12 %blocked= 0
+sha512_24: %idle=14 %blocked= 0
+sha512_25: %idle=14 %blocked= 0
+sha512_26: %idle= 9 %blocked= 0
+sha512_27: %idle= 6 %blocked= 0
+sha512_28: %idle=14 %blocked= 0
+sha512_29: %idle=10 %blocked= 0
+sha512_30: %idle=13 %blocked= 0
+sha512_31: %idle=12 %blocked= 0
+blake3__0: %idle=18 %blocked= 4
+blake3__1: %idle=17 %blocked= 0
+blake3__2: %idle=17 %blocked= 3
+blake3__3: %idle=19 %blocked= 2
+blake3__4: %idle=16 %blocked= 2
+blake3__5: %idle=12 %blocked= 3
+blake3__6: %idle= 7 %blocked= 2
+blake3__7: %idle=18 %blocked= 2
+result   : %idle=57 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 4 %blocked= 0
+sha512__1: %idle=14 %blocked= 0
+sha512__2: %idle= 6 %blocked= 0
+sha512__3: %idle= 6 %blocked= 0
+sha512__4: %idle= 9 %blocked= 0
+sha512__5: %idle= 9 %blocked= 0
+sha512__6: %idle=10 %blocked= 0
+sha512__7: %idle=12 %blocked= 0
+sha512__8: %idle=13 %blocked= 0
+sha512__9: %idle= 9 %blocked= 0
+sha512_10: %idle=13 %blocked= 0
+sha512_11: %idle= 9 %blocked= 0
+sha512_12: %idle= 9 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle= 8 %blocked= 0
+sha512_15: %idle=14 %blocked= 0
+sha512_16: %idle= 7 %blocked= 0
+sha512_17: %idle=11 %blocked= 0
+sha512_18: %idle=10 %blocked= 0
+sha512_19: %idle=14 %blocked= 0
+sha512_20: %idle= 9 %blocked= 0
+sha512_21: %idle=12 %blocked= 0
+sha512_22: %idle=10 %blocked= 0
+sha512_23: %idle= 9 %blocked= 0
+sha512_24: %idle=12 %blocked= 0
+sha512_25: %idle=12 %blocked= 0
+sha512_26: %idle= 8 %blocked= 0
+sha512_27: %idle= 7 %blocked= 0
+sha512_28: %idle=13 %blocked= 0
+sha512_29: %idle= 8 %blocked= 0
+sha512_30: %idle=13 %blocked= 0
+sha512_31: %idle=10 %blocked= 0
+blake3__0: %idle=15 %blocked= 5
+blake3__1: %idle=15 %blocked= 2
+blake3__2: %idle=13 %blocked= 4
+blake3__3: %idle=15 %blocked= 2
+blake3__4: %idle=14 %blocked= 4
+blake3__5: %idle=10 %blocked= 5
+blake3__6: %idle= 7 %blocked= 3
+blake3__7: %idle=15 %blocked= 4
+result   : %idle=56 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 4 %blocked= 0
+sha512__1: %idle=15 %blocked= 0
+sha512__2: %idle= 7 %blocked= 0
+sha512__3: %idle= 5 %blocked= 0
+sha512__4: %idle=10 %blocked= 0
+sha512__5: %idle= 9 %blocked= 0
+sha512__6: %idle= 9 %blocked= 0
+sha512__7: %idle=12 %blocked= 0
+sha512__8: %idle=12 %blocked= 0
+sha512__9: %idle=10 %blocked= 0
+sha512_10: %idle=12 %blocked= 0
+sha512_11: %idle= 8 %blocked= 0
+sha512_12: %idle=10 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle= 7 %blocked= 0
+sha512_15: %idle=13 %blocked= 0
+sha512_16: %idle= 7 %blocked= 0
+sha512_17: %idle= 9 %blocked= 0
+sha512_18: %idle=10 %blocked= 0
+sha512_19: %idle=14 %blocked= 0
+sha512_20: %idle=10 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=11 %blocked= 0
+sha512_23: %idle= 9 %blocked= 0
+sha512_24: %idle=13 %blocked= 0
+sha512_25: %idle=10 %blocked= 0
+sha512_26: %idle= 8 %blocked= 0
+sha512_27: %idle=10 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 8 %blocked= 0
+sha512_30: %idle=12 %blocked= 0
+sha512_31: %idle= 8 %blocked= 0
+blake3__0: %idle=15 %blocked= 5
+blake3__1: %idle=12 %blocked= 2
+blake3__2: %idle=12 %blocked= 5
+blake3__3: %idle=13 %blocked= 2
+blake3__4: %idle=13 %blocked= 5
+blake3__5: %idle=11 %blocked= 5
+blake3__6: %idle= 8 %blocked= 4
+blake3__7: %idle=13 %blocked= 5
+result   : %idle=54 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 4 %blocked= 0
+sha512__1: %idle=13 %blocked= 0
+sha512__2: %idle= 8 %blocked= 0
+sha512__3: %idle= 5 %blocked= 0
+sha512__4: %idle=11 %blocked= 0
+sha512__5: %idle= 8 %blocked= 0
+sha512__6: %idle=10 %blocked= 0
+sha512__7: %idle=11 %blocked= 0
+sha512__8: %idle=12 %blocked= 0
+sha512__9: %idle=11 %blocked= 0
+sha512_10: %idle=11 %blocked= 0
+sha512_11: %idle= 7 %blocked= 0
+sha512_12: %idle=10 %blocked= 0
+sha512_13: %idle=10 %blocked= 0
+sha512_14: %idle= 8 %blocked= 0
+sha512_15: %idle=12 %blocked= 0
+sha512_16: %idle= 8 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 9 %blocked= 0
+sha512_19: %idle=14 %blocked= 0
+sha512_20: %idle= 9 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=10 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=12 %blocked= 0
+sha512_25: %idle= 9 %blocked= 0
+sha512_26: %idle= 7 %blocked= 0
+sha512_27: %idle=10 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 7 %blocked= 0
+sha512_30: %idle=12 %blocked= 0
+sha512_31: %idle= 8 %blocked= 0
+blake3__0: %idle=13 %blocked= 5
+blake3__1: %idle=11 %blocked= 4
+blake3__2: %idle=11 %blocked= 5
+blake3__3: %idle=12 %blocked= 3
+blake3__4: %idle=13 %blocked= 6
+blake3__5: %idle=11 %blocked= 6
+blake3__6: %idle= 8 %blocked= 4
+blake3__7: %idle=12 %blocked= 5
+result   : %idle=55 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 4 %blocked= 0
+sha512__1: %idle=13 %blocked= 0
+sha512__2: %idle= 7 %blocked= 0
+sha512__3: %idle= 4 %blocked= 0
+sha512__4: %idle=11 %blocked= 0
+sha512__5: %idle= 8 %blocked= 0
+sha512__6: %idle=10 %blocked= 0
+sha512__7: %idle=11 %blocked= 0
+sha512__8: %idle=12 %blocked= 0
+sha512__9: %idle=12 %blocked= 0
+sha512_10: %idle=12 %blocked= 0
+sha512_11: %idle= 9 %blocked= 0
+sha512_12: %idle=11 %blocked= 0
+sha512_13: %idle=12 %blocked= 0
+sha512_14: %idle= 9 %blocked= 0
+sha512_15: %idle=11 %blocked= 0
+sha512_16: %idle= 9 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 8 %blocked= 0
+sha512_19: %idle=13 %blocked= 0
+sha512_20: %idle=10 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=10 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=12 %blocked= 0
+sha512_25: %idle=11 %blocked= 0
+sha512_26: %idle= 7 %blocked= 0
+sha512_27: %idle=11 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 7 %blocked= 0
+sha512_30: %idle=12 %blocked= 0
+sha512_31: %idle=10 %blocked= 0
+blake3__0: %idle=12 %blocked= 6
+blake3__1: %idle=11 %blocked= 5
+blake3__2: %idle=10 %blocked= 6
+blake3__3: %idle=11 %blocked= 5
+blake3__4: %idle=12 %blocked= 8
+blake3__5: %idle=10 %blocked= 8
+blake3__6: %idle= 8 %blocked= 6
+blake3__7: %idle=11 %blocked= 7
+result   : %idle=55 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 5 %blocked= 0
+sha512__1: %idle=12 %blocked= 0
+sha512__2: %idle= 8 %blocked= 0
+sha512__3: %idle= 4 %blocked= 0
+sha512__4: %idle=11 %blocked= 0
+sha512__5: %idle= 7 %blocked= 0
+sha512__6: %idle= 9 %blocked= 0
+sha512__7: %idle=12 %blocked= 0
+sha512__8: %idle=11 %blocked= 0
+sha512__9: %idle=11 %blocked= 0
+sha512_10: %idle=12 %blocked= 0
+sha512_11: %idle= 9 %blocked= 0
+sha512_12: %idle=10 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle= 7 %blocked= 0
+sha512_15: %idle=10 %blocked= 0
+sha512_16: %idle= 9 %blocked= 0
+sha512_17: %idle= 9 %blocked= 0
+sha512_18: %idle= 8 %blocked= 0
+sha512_19: %idle=13 %blocked= 0
+sha512_20: %idle=11 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=10 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=11 %blocked= 0
+sha512_25: %idle=10 %blocked= 0
+sha512_26: %idle= 6 %blocked= 0
+sha512_27: %idle=11 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 8 %blocked= 0
+sha512_30: %idle=11 %blocked= 0
+sha512_31: %idle=10 %blocked= 0
+blake3__0: %idle=11 %blocked= 7
+blake3__1: %idle=10 %blocked= 7
+blake3__2: %idle= 9 %blocked= 7
+blake3__3: %idle=10 %blocked= 7
+blake3__4: %idle=11 %blocked=10
+blake3__5: %idle= 9 %blocked= 9
+blake3__6: %idle= 7 %blocked= 8
+blake3__7: %idle=10 %blocked= 8
+result   : %idle=54 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 7 %blocked= 0
+sha512__1: %idle=13 %blocked= 0
+sha512__2: %idle= 9 %blocked= 0
+sha512__3: %idle= 5 %blocked= 0
+sha512__4: %idle=11 %blocked= 0
+sha512__5: %idle= 8 %blocked= 0
+sha512__6: %idle= 9 %blocked= 0
+sha512__7: %idle=11 %blocked= 0
+sha512__8: %idle=10 %blocked= 0
+sha512__9: %idle=11 %blocked= 0
+sha512_10: %idle=11 %blocked= 0
+sha512_11: %idle= 9 %blocked= 0
+sha512_12: %idle=10 %blocked= 0
+sha512_13: %idle=12 %blocked= 0
+sha512_14: %idle= 7 %blocked= 0
+sha512_15: %idle=10 %blocked= 0
+sha512_16: %idle=10 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 8 %blocked= 0
+sha512_19: %idle=12 %blocked= 0
+sha512_20: %idle=10 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=10 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=12 %blocked= 0
+sha512_25: %idle=11 %blocked= 0
+sha512_26: %idle= 7 %blocked= 0
+sha512_27: %idle=12 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 9 %blocked= 0
+sha512_30: %idle=12 %blocked= 0
+sha512_31: %idle=10 %blocked= 0
+blake3__0: %idle=10 %blocked= 9
+blake3__1: %idle=10 %blocked= 8
+blake3__2: %idle= 9 %blocked= 8
+blake3__3: %idle=11 %blocked= 8
+blake3__4: %idle=11 %blocked=11
+blake3__5: %idle= 9 %blocked= 9
+blake3__6: %idle= 7 %blocked= 8
+blake3__7: %idle=10 %blocked= 9
+result   : %idle=54 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 7 %blocked= 0
+sha512__1: %idle=12 %blocked= 0
+sha512__2: %idle= 9 %blocked= 0
+sha512__3: %idle= 6 %blocked= 0
+sha512__4: %idle=10 %blocked= 0
+sha512__5: %idle= 8 %blocked= 0
+sha512__6: %idle= 9 %blocked= 0
+sha512__7: %idle=11 %blocked= 0
+sha512__8: %idle= 9 %blocked= 0
+sha512__9: %idle=10 %blocked= 0
+sha512_10: %idle=11 %blocked= 0
+sha512_11: %idle= 9 %blocked= 0
+sha512_12: %idle= 9 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle= 7 %blocked= 0
+sha512_15: %idle=10 %blocked= 0
+sha512_16: %idle= 9 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 8 %blocked= 0
+sha512_19: %idle=11 %blocked= 0
+sha512_20: %idle=10 %blocked= 0
+sha512_21: %idle=11 %blocked= 0
+sha512_22: %idle=10 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=12 %blocked= 0
+sha512_25: %idle=10 %blocked= 0
+sha512_26: %idle= 7 %blocked= 0
+sha512_27: %idle=13 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 8 %blocked= 0
+sha512_30: %idle=11 %blocked= 0
+sha512_31: %idle=10 %blocked= 0
+blake3__0: %idle=10 %blocked= 8
+blake3__1: %idle=10 %blocked= 7
+blake3__2: %idle= 9 %blocked= 7
+blake3__3: %idle=11 %blocked= 7
+blake3__4: %idle=11 %blocked=10
+blake3__5: %idle= 9 %blocked= 9
+blake3__6: %idle= 8 %blocked= 7
+blake3__7: %idle=11 %blocked= 8
+result   : %idle=54 %blocked= 0
+
+generator: %idle= 0 %blocked= 0
+sha512__0: %idle= 7 %blocked= 0
+sha512__1: %idle=12 %blocked= 0
+sha512__2: %idle= 8 %blocked= 0
+sha512__3: %idle= 7 %blocked= 0
+sha512__4: %idle=10 %blocked= 0
+sha512__5: %idle= 7 %blocked= 0
+sha512__6: %idle= 8 %blocked= 0
+sha512__7: %idle=11 %blocked= 0
+sha512__8: %idle= 9 %blocked= 0
+sha512__9: %idle=10 %blocked= 0
+sha512_10: %idle=11 %blocked= 0
+sha512_11: %idle= 9 %blocked= 0
+sha512_12: %idle=10 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle= 8 %blocked= 0
+sha512_15: %idle=11 %blocked= 0
+sha512_16: %idle= 9 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 8 %blocked= 0
+sha512_19: %idle=11 %blocked= 0
+sha512_20: %idle=10 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=11 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=11 %blocked= 0
+sha512_25: %idle=10 %blocked= 0
+sha512_26: %idle= 6 %blocked= 0
+sha512_27: %idle=12 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 8 %blocked= 0
+sha512_30: %idle=10 %blocked= 0
+sha512_31: %idle=10 %blocked= 0
+blake3__0: %idle=10 %blocked= 8
+blake3__1: %idle=10 %blocked= 7
+blake3__2: %idle= 9 %blocked= 7
+blake3__3: %idle=11 %blocked= 8
+blake3__4: %idle=11 %blocked=10
+blake3__5: %idle= 9 %blocked= 8
+blake3__6: %idle= 8 %blocked= 8
+blake3__7: %idle=10 %blocked= 8
+result   : %idle=54 %blocked= 0
+
+generator: %idle= 0 %blocked= 1
+sha512__0: %idle= 7 %blocked= 0
+sha512__1: %idle=11 %blocked= 0
+sha512__2: %idle= 8 %blocked= 0
+sha512__3: %idle= 7 %blocked= 0
+sha512__4: %idle=10 %blocked= 0
+sha512__5: %idle= 8 %blocked= 0
+sha512__6: %idle= 9 %blocked= 0
+sha512__7: %idle=10 %blocked= 0
+sha512__8: %idle= 8 %blocked= 0
+sha512__9: %idle=10 %blocked= 0
+sha512_10: %idle=10 %blocked= 0
+sha512_11: %idle= 8 %blocked= 0
+sha512_12: %idle= 9 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle= 8 %blocked= 0
+sha512_15: %idle=10 %blocked= 0
+sha512_16: %idle=10 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 8 %blocked= 0
+sha512_19: %idle=11 %blocked= 0
+sha512_20: %idle=10 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=11 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=10 %blocked= 0
+sha512_25: %idle= 9 %blocked= 0
+sha512_26: %idle= 7 %blocked= 0
+sha512_27: %idle=12 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 8 %blocked= 0
+sha512_30: %idle=10 %blocked= 0
+sha512_31: %idle= 9 %blocked= 0
+blake3__0: %idle= 9 %blocked=10
+blake3__1: %idle= 9 %blocked= 8
+blake3__2: %idle= 9 %blocked= 9
+blake3__3: %idle=10 %blocked= 9
+blake3__4: %idle=10 %blocked=11
+blake3__5: %idle= 9 %blocked= 9
+blake3__6: %idle= 8 %blocked= 9
+blake3__7: %idle=10 %blocked= 9
+result   : %idle=53 %blocked= 0
+
+generator: %idle= 0 %blocked= 1
+sha512__0: %idle= 7 %blocked= 0
+sha512__1: %idle=11 %blocked= 0
+sha512__2: %idle= 8 %blocked= 0
+sha512__3: %idle= 7 %blocked= 0
+sha512__4: %idle=11 %blocked= 0
+sha512__5: %idle= 8 %blocked= 0
+sha512__6: %idle= 8 %blocked= 0
+sha512__7: %idle=10 %blocked= 0
+sha512__8: %idle= 8 %blocked= 0
+sha512__9: %idle= 9 %blocked= 0
+sha512_10: %idle=10 %blocked= 0
+sha512_11: %idle= 8 %blocked= 0
+sha512_12: %idle= 9 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle= 8 %blocked= 0
+sha512_15: %idle=10 %blocked= 0
+sha512_16: %idle=10 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 9 %blocked= 0
+sha512_19: %idle=11 %blocked= 0
+sha512_20: %idle=10 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=11 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=10 %blocked= 0
+sha512_25: %idle= 9 %blocked= 0
+sha512_26: %idle= 8 %blocked= 0
+sha512_27: %idle=13 %blocked= 0
+sha512_28: %idle=12 %blocked= 0
+sha512_29: %idle= 9 %blocked= 0
+sha512_30: %idle=10 %blocked= 0
+sha512_31: %idle= 9 %blocked= 0
+blake3__0: %idle= 9 %blocked=10
+blake3__1: %idle= 9 %blocked= 8
+blake3__2: %idle= 9 %blocked= 9
+blake3__3: %idle=10 %blocked= 9
+blake3__4: %idle=10 %blocked=10
+blake3__5: %idle= 9 %blocked= 9
+blake3__6: %idle= 8 %blocked= 9
+blake3__7: %idle=10 %blocked= 9
+result   : %idle=54 %blocked= 0
+
+generator: %idle= 0 %blocked= 1
+sha512__0: %idle= 7 %blocked= 0
+sha512__1: %idle=11 %blocked= 0
+sha512__2: %idle= 8 %blocked= 0
+sha512__3: %idle= 8 %blocked= 0
+sha512__4: %idle=10 %blocked= 0
+sha512__5: %idle= 8 %blocked= 0
+sha512__6: %idle= 9 %blocked= 0
+sha512__7: %idle=10 %blocked= 0
+sha512__8: %idle= 9 %blocked= 0
+sha512__9: %idle= 9 %blocked= 0
+sha512_10: %idle=10 %blocked= 0
+sha512_11: %idle= 8 %blocked= 0
+sha512_12: %idle=10 %blocked= 0
+sha512_13: %idle=11 %blocked= 0
+sha512_14: %idle= 8 %blocked= 0
+sha512_15: %idle=11 %blocked= 0
+sha512_16: %idle=10 %blocked= 0
+sha512_17: %idle=10 %blocked= 0
+sha512_18: %idle= 9 %blocked= 0
+sha512_19: %idle=11 %blocked= 0
+sha512_20: %idle=10 %blocked= 0
+sha512_21: %idle=10 %blocked= 0
+sha512_22: %idle=11 %blocked= 0
+sha512_23: %idle= 8 %blocked= 0
+sha512_24: %idle=10 %blocked= 0
+sha512_25: %idle=10 %blocked= 0
+sha512_26: %idle= 8 %blocked= 0
+sha512_27: %idle=12 %blocked= 0
+sha512_28: %idle=11 %blocked= 0
+sha512_29: %idle= 9 %blocked= 0
+sha512_30: %idle=10 %blocked= 0
+sha512_31: %idle=10 %blocked= 0
+blake3__0: %idle=10 %blocked=10
+blake3__1: %idle= 9 %blocked= 8
+blake3__2: %idle= 9 %blocked= 9
+blake3__3: %idle=10 %blocked= 9
+blake3__4: %idle=10 %blocked=11
+blake3__5: %idle=10 %blocked= 9
+blake3__6: %idle= 9 %blocked= 9
+blake3__7: %idle=10 %blocked= 9
+result   : %idle=54 %blocked= 0
+
+sha512 = 32, blake3 =  8, time = 14.369890849s
+#+end_example
+
+** conclusion
+Among those tests, the best is ~sha512 = 32, blake3 =  8, time = 14.369890849s~.
+The original time is ~214.70813464s~, it's more than 14 times improved.
+
+All tests run on a laptop with AMD 7945HX:
+#+begin_src sh :results output :exports both
+lscpu | grep -e "Model name" -e "Core" -e "Thread"
+#+end_src
+
+#+RESULTS:
+: Model name:                         AMD Ryzen 9 7945HX with Radeon Graphics
+: Thread(s) per core:                 2
+: Core(s) per socket:                 16
