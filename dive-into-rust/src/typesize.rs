@@ -12,6 +12,8 @@ mod tests {
         assert_eq!(4, size_of::<i32>());
         assert_eq!(8, size_of::<i64>());
         assert_eq!(16, size_of::<i128>());
+        assert_eq!(8, size_of::<isize>());
+        assert_eq!(8, size_of::<usize>());
         assert_eq!(4, size_of::<f32>());
         assert_eq!(8, size_of::<f64>());
         assert_eq!(4, size_of::<char>());
@@ -53,7 +55,7 @@ mod tests {
         assert_eq!(12, size_of::<[f32; 3]>());
         assert_eq!(0, size_of::<[f32; 0]>());
         // slice
-        let psize = size_of::<&u8>();
+        let psize = size_of::<usize>();
         assert_eq!(psize, size_of::<&[i8; 2]>());
         assert_eq!(16, size_of::<&[i8]>()); // fat pointer
         assert_eq!(16, size_of::<&mut [i8]>()); // fat pointer
@@ -62,6 +64,12 @@ mod tests {
         assert_eq!(8, size_of::<&[i32; 0]>());
         assert_eq!(16, size_of::<&[i32]>()); // fat pointer
         assert_eq!(16, size_of::<&mut [i32]>()); // fat pointer
+
+        let word_len = size_of::<usize>();
+        assert_eq!(3 * word_len, size_of::<Vec<u8>>());
+        assert_eq!(3 * word_len, size_of::<Vec<char>>());
+        assert_eq!(3 * word_len, size_of::<Vec<isize>>());
+        assert_eq!(3 * word_len, size_of::<Vec<i128>>());
     }
 
     // *** Struct **************************************************************
@@ -100,6 +108,7 @@ mod tests {
             x: i8,  // 1
             y: f64, // 8
             z: i32, // 4
+            b: i8,  // 1
         }
         assert_eq!(16, size_of::<Foo2>());
 
