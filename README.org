@@ -70,3 +70,5 @@ The official rust book - [[https://github.com/rust-lang/book][The Rust Programmi
 - [[file:too-many-lists/lists/src/lib.rs][code]]
 
 * [[file:hash-pipeline/hash-pipeline.org][hash-pipeline]]
+
+* [[file:zero2prod/zero2prod.org][zero2prod]]

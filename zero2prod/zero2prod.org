@@ -1,0 +1,57 @@
+#+title: Zero2prod
+
+* test
+#+begin_src restclient :results output
+GET http://localhost:8000/sl
+#+end_src
+
+#+RESULTS:
+#+BEGIN_SRC js
+// GET http://localhost:8000/sl
+// HTTP/1.1 404 Not Found
+// content-length: 0
+// date: Thu, 10 Oct 2024 07:26:28 GMT
+// Request duration: 0.000806s
+#+END_SRC
+
+#+begin_src restclient :results output
+GET http://localhost:8000/health_check
+#+end_src
+
+#+RESULTS:
+#+BEGIN_SRC js
+// GET http://localhost:8000/health_check
+// HTTP/1.1 200 OK
+// content-length: 0
+// date: Sat, 12 Oct 2024 03:37:29 GMT
+// Request duration: 0.000928s
+#+END_SRC
+
+#+begin_src restclient :results output
+POST http://localhost:8000/subscriptions
+Content-Type: application/x-www-form-urlencoded
+'email=thomas_mann@hotmail.com&name=Tom'
+#+end_src
+
+#+RESULTS:
+#+BEGIN_SRC text
+Parse error: missing field `email`.
+POST http://localhost:8000/subscriptions
+HTTP/1.1 400 Bad Request
+content-length: 35
+content-type: text/plain; charset=utf-8
+date: Sun, 13 Oct 2024 03:34:05 GMT
+Request duration: 0.009674s
+#+END_SRC
+
+#+begin_src sh :results output
+curl -i -H Content-Type\:\ application/x-www-form-urlencoded -XPOST \
+    http://localhost:8000/subscriptions -d \
+    'email=thomas_mann13@hotmail.com&name=Tom'
+#+end_src
+
+#+RESULTS:
+: HTTP/1.1 200 OK
+: content-length: 0
+: date: Wed, 16 Oct 2024 02:37:05 GMT
+: 
