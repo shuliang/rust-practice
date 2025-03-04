@@ -8,3 +8,4 @@ yew/*/.log
 
 # ignore direnv
 .direnv
+.aider*
