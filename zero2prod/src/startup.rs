@@ -3,17 +3,15 @@ use crate::configuration::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
 use crate::routes::{
     admin_dashboard, change_password, change_password_form, confirm, health_check, home, log_out,
-    login, login_form, publish_newsletter, subscribe,
+    login, login_form, publish_newsletter, publish_newsletter_form, subscribe,
 };
 
 use actix_session::storage::RedisSessionStore;
 use actix_session::SessionMiddleware;
 use actix_web::cookie::Key;
 use actix_web::dev::Server;
-use actix_web::web;
 use actix_web::web::Data;
-use actix_web::App;
-use actix_web::HttpServer;
+use actix_web::{web, App, HttpServer};
 use actix_web_flash_messages::storage::CookieMessageStore;
 use actix_web_flash_messages::FlashMessagesFramework;
 use actix_web_lab::middleware::from_fn;
@@ -59,6 +57,7 @@ impl Application {
             configuration.redis_uri,
         )
         .await?;
+
         Ok(Self { port, server })
     }
 
@@ -71,10 +70,13 @@ impl Application {
     }
 }
 
-pub struct ApplicationBaseUrl(pub String);
+pub fn get_connection_pool(configuration: &DatabaseSettings) -> PgPool {
+    PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_lazy_with(configuration.with_db())
+}
 
-#[derive(Clone)]
-pub struct HmacSecret(pub Secret<String>);
+pub struct ApplicationBaseUrl(pub String);
 
 async fn run(
     listener: TcpListener,
@@ -100,31 +102,31 @@ async fn run(
             ))
             .wrap(TracingLogger::default())
             .route("/", web::get().to(home))
-            .route("/login", web::get().to(login_form))
-            .route("/login", web::post().to(login))
-            .route("/health_check", web::get().to(health_check))
-            .route("/newsletters", web::post().to(publish_newsletter))
-            .route("/subscriptions", web::post().to(subscribe))
-            .route("/subscriptions/confirm", web::get().to(confirm))
             .service(
                 web::scope("/admin")
                     .wrap(from_fn(reject_anonymous_users))
                     .route("/dashboard", web::get().to(admin_dashboard))
+                    .route("/newsletters", web::get().to(publish_newsletter_form))
+                    .route("/newsletters", web::post().to(publish_newsletter))
                     .route("/password", web::get().to(change_password_form))
                     .route("/password", web::post().to(change_password))
                     .route("/logout", web::post().to(log_out)),
             )
+            .route("/login", web::get().to(login_form))
+            .route("/login", web::post().to(login))
+            .route("/health_check", web::get().to(health_check))
+            .route("/subscriptions", web::post().to(subscribe))
+            .route("/subscriptions/confirm", web::get().to(confirm))
+            .route("/newsletters", web::post().to(publish_newsletter))
             .app_data(db_pool.clone())
             .app_data(email_client.clone())
             .app_data(base_url.clone())
+            .app_data(Data::new(HmacSecret(hmac_secret.clone())))
     })
     .listen(listener)?
     .run();
     Ok(server)
 }
 
-pub fn get_connection_pool(configuration: &DatabaseSettings) -> PgPool {
-    PgPoolOptions::new()
-        .acquire_timeout(std::time::Duration::from_secs(2))
-        .connect_lazy_with(configuration.with_db())
-}
+#[derive(Clone)]
+pub struct HmacSecret(pub Secret<String>);

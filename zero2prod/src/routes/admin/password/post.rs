@@ -3,9 +3,10 @@ use actix_web_flash_messages::FlashMessage;
 use secrecy::{ExposeSecret, Secret};
 use sqlx::PgPool;
 
+use crate::routes::admin::dashboard::get_username;
 use crate::{
     authentication::{validate_credentials, AuthError, Credentials, UserId},
-    routes::{get_username, PASSWORD_LEN_LONGEST, PASSWORD_LEN_SHORTEST},
+    routes::{PASSWORD_LEN_LONGEST, PASSWORD_LEN_SHORTEST},
     utils::{e500, see_other},
 };
 
